@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gesture-Based Music Player</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .status-light {
+            width: 12px; height: 12px; border-radius: 50%; display: inline-block; margin-right: 8px; transition: background-color 0.3s ease;
+        }
+        .status-processing { background-color: #34D399; } /* Green */
+        .status-error { background-color: #F87171; } /* Red */
+        .status-idle { background-color: #6B7280; } /* Gray */
+        .player-card { background-color: #1F2937; border: 1px solid #374151; }
+        .gesture-display { transition: all 0.3s ease-in-out; }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex items-center justify-center min-h-screen">
+    
+    <!-- Main Application Container -->
+    <div id="app-container" class="hidden w-full max-w-5xl mx-auto p-4 md:p-8">
+        <div class="text-center mb-6">
+            <h1 class="text-3xl md:text-4xl font-bold text-green-400">Gesture Control for Spotify</h1>
+            <p class="text-gray-400 mt-2">Using MediaPipe, Flask, and the Spotify Web API.</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <!-- Main Video and Detection View -->
+            <div class="md:col-span-2 rounded-lg p-4 player-card">
+                <h2 class="text-xl font-semibold mb-3 text-gray-300">ML Processed View</h2>
+                <div class="relative bg-black rounded-md overflow-hidden aspect-video">
+                    <!-- Hidden raw video -->
+                    <video id="webcam" autoplay playsinline muted style="display: none;"></video>
+                    <!-- Canvas for drawing the processed frame -->
+                    <canvas id="output_canvas" class="absolute top-0 left-0 w-full h-full"></canvas>
+                </div>
+                <div id="status-container" class="mt-4 flex items-center text-sm">
+                    <div id="status-light" class="status-light status-idle"></div>
+                    <span id="status-text" class="text-gray-400">Initializing...</span>
+                </div>
+            </div>
+
+            <!-- Controls and Status -->
+            <div class="rounded-lg p-4 player-card flex flex-col justify-between">
+                <div>
+                    <h2 class="text-xl font-semibold mb-3 text-gray-300">Current Gesture</h2>
+                    <div id="gesture-output" class="gesture-display bg-gray-700 text-center py-4 rounded-md text-2xl font-bold text-yellow-400 border border-gray-600">
+                        Awaiting...
+                    </div>
+
+                    <h2 class="text-xl font-semibold mt-6 mb-3 text-gray-300">Spotify Playback</h2>
+                    <div class="space-y-3 text-gray-300">
+                        <p><strong>Track:</strong> <span id="track-name" class="text-gray-400">...</span></p>
+                        <p><strong>Status:</strong> <span id="playback-status" class="text-gray-400">...</span></p>
+                        <div class="flex items-center">
+                            <strong class="mr-2">Volume:</strong>
+                            <div class="w-full bg-gray-700 rounded-full h-2.5">
+                                <div id="volume-bar" class="bg-green-500 h-2.5 rounded-full" style="width: 50%"></div>
+                            </div>
+                            <span id="volume-percent" class="ml-2 w-12 text-right">...</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-6">
+                    <h3 class="text-lg font-semibold mb-2 text-gray-300">Control Mappings</h3>
+                    <ul class="space-y-1 text-sm text-gray-400 list-inside">
+                        <li><strong class="text-green-400">Open Hand:</strong> Play</li>
+                        <li><strong class="text-green-400">Closed Fist:</strong> Pause</li>
+                        <li><strong class="text-green-400">Index Finger Up:</strong> Volume Up</li>
+                        <li><strong class="text-green-400">Thumb Down:</strong> Volume Down</li>
+                        <li><strong class="text-green-400">"V" Sign:</strong> Skip Track</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Login/Error Message Container -->
+    <div id="message-container" class="hidden w-full max-w-md mx-auto p-8 text-center player-card rounded-lg">
+         <h1 class="text-3xl md:text-4xl font-bold text-green-400">Gesture Control</h1>
+         <p class="text-gray-400 mt-2 mb-6">Log in to Spotify to continue.</p>
+         <a href="/login" id="login-button" target="_self" class="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg text-lg transition-colors">
+            Log In with Spotify
+         </a>
+         <p id="error-message" class="text-red-400 mt-4"></p>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const statusLight = document.getElementById('status-light');
+        const statusText = document.getElementById('status-text');
+        const gestureOutput = document.getElementById('gesture-output');
+        const trackName = document.getElementById('track-name');
+        const playbackStatus = document.getElementById('playback-status');
+        const volumeBar = document.getElementById('volume-bar');
+        const volumePercent = document.getElementById('volume-percent');
+        const appContainer = document.getElementById('app-container');
+        const messageContainer = document.getElementById('message-container');
+        const errorMessage = document.getElementById('error-message');
+
+        const FLASK_API_URL = 'http://127.0.0.1:5000/process_frame';
+        const TOKEN_URL = 'http://127.0.0.1:5000/get_token';
+        
+        // Delay between frames in ms. 100ms = ~10 FPS.
+        const LOOP_DELAY = 100; 
+
+        async function setupCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                videoElement.srcObject = stream;
+                return new Promise((resolve) => {
+                    videoElement.onloadedmetadata = () => {
+                        canvasElement.width = videoElement.videoWidth;
+                        canvasElement.height = videoElement.videoHeight;
+                        videoElement.play(); // Force play
+                        resolve(videoElement);
+                    };
+                });
+            } catch (err) {
+                console.error("Error accessing webcam:", err);
+                showError("Webcam not accessible. Please check permissions.");
+            }
+        }
+
+        function updateStatus(message, status = 'processing') {
+            statusText.textContent = message;
+            statusLight.className = `status-light status-${status}`;
+        }
+        
+        function showError(message) {
+            appContainer.classList.add('hidden');
+            messageContainer.classList.remove('hidden');
+            errorMessage.textContent = message;
+        }
+
+        function updateUI(data) {
+            gestureOutput.textContent = data.gesture;
+            trackName.textContent = data.current_track_name;
+            playbackStatus.textContent = data.playback_status;
+            volumeBar.style.width = `${data.volume}%`;
+            volumePercent.textContent = `${data.volume}%`;
+            
+            if (data.mask_data) {
+                const image = new Image();
+                image.onload = () => {
+                    if (canvasElement.width !== image.width) {
+                         canvasElement.width = image.width;
+                         canvasElement.height = image.height;
+                    }
+                    canvasCtx.drawImage(image, 0, 0, canvasElement.width, canvasElement.height);
+                };
+                image.src = `data:image/jpeg;base64,${data.mask_data}`;
+            }
+        }
+
+        async function sendFrame() {
+            // Ensure video is ready before sending
+            if (videoElement.readyState < 3) {
+                setTimeout(sendFrame, 100); // Try again shortly
+                return;
+            }
+
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = videoElement.videoWidth;
+            tempCanvas.height = videoElement.videoHeight;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(videoElement, 0, 0, tempCanvas.width, tempCanvas.height);
+            
+            // Compress image to reduce network lag (0.6 quality)
+            const imageData = tempCanvas.toDataURL('image/jpeg', 0.6);
+
+            try {
+                const response = await fetch(FLASK_API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image_data: imageData }),
+                    credentials: 'include' // Important for session cookies
+                });
+
+                if (response.status === 401) {
+                    console.warn("Session expired. Redirecting...");
+                    window.location.href = '/login';
+                    return;
+                }
+                
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const data = await response.json();
+                if(data.error) throw new Error(data.error);
+                
+                updateStatus('Processing live frames...');
+                updateUI(data);
+
+            } catch (error) {
+                console.error("Fetch error:", error);
+                updateStatus('Connecting to backend...', 'idle');
+            } finally {
+                // RECURSIVE CALL: Only schedule the next frame when this one is done.
+                // This prevents lag from request pile-up.
+                setTimeout(sendFrame, LOOP_DELAY);
+            }
+        }
+
+        async function main() {
+            try {
+                const tokenResponse = await fetch(TOKEN_URL, { credentials: 'include' }); 
+                if (!tokenResponse.ok) throw new Error("Not authenticated");
+                
+                appContainer.classList.remove('hidden');
+                messageContainer.classList.add('hidden');
+                
+                updateStatus('Setting up camera...', 'idle');
+                await setupCamera();
+                
+                // Slight delay to stabilize video stream
+                await new Promise(r => setTimeout(r, 500)); 
+                
+                updateStatus('Camera ready. Starting...', 'processing');
+                sendFrame(); // Start the recursive loop
+                
+            } catch (error) {
+                console.log("Auth check failed:", error);
+                showError("Please log in to Spotify to use the app.");
+            }
+        }
+
+        window.onload = main;
+    </script>
+</body>
+</html>
